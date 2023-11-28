@@ -1,0 +1,1 @@
+protoc -Iapi/proto -I%GOPATH% -I%GOPATH%/src  --go_out=. --go-grpc_out=. api/proto/cargo.proto api/proto/geo_service.proto api/proto/user.proto api/proto/auth.proto api/proto/truck.proto api/proto/service_station.proto api/proto/references.proto api/proto/spare_parts.proto api/proto/transport.proto api/proto/roadside_service.proto api/proto/user_profile.proto

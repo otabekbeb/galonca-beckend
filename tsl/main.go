@@ -1,0 +1,127 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"github.com/improbable-eng/grpc-web/go/grpcweb"
+	"github.com/joho/godotenv"
+	"google.golang.org/grpc"
+	"log"
+	"net"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"tsl_server/api"
+	"tsl_server/img_manager"
+	"tsl_server/service"
+)
+
+func main() {
+
+	e := godotenv.Load()
+	if e != nil {
+		log.Fatalf("Error read enveroment %v", e)
+	}
+	grpcPort := os.Getenv("grpc_port")
+	webPort := os.Getenv("web_port")
+	grpcServer := grpc.NewServer(
+		grpc.UnaryInterceptor(service.NewAuthInterceptor().Unary()),
+		grpc.StreamInterceptor(service.NewAuthInterceptor().Stream()),
+	)
+	wrapServer := grpcweb.WrapServer(grpcServer)
+	webServer := &http.Server{Addr: ":" + webPort}
+	http.DefaultServeMux.Handle("/imageManager/list", service.NewWebAuthMiddleware().WebAuth(http.HandlerFunc(img_manager.ListImages)))
+	http.DefaultServeMux.HandleFunc("/preview", img_manager.ImagePreview)
+	http.DefaultServeMux.HandleFunc("/image/upload", img_manager.ImageUpload)
+	http.DefaultServeMux.HandleFunc("/image/delete", img_manager.Delete)
+
+	webServer.Handler = http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.ProtoMajor == 2 {
+			log.Printf("HTTP2 request from %v", req.RemoteAddr)
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+			w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT, DELETE")
+			w.Header().Set("Access-Control-Allow-Headers", "Accept, Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, X-User-Agent, X-Grpc-Web, Resetpasswordtoken, Captchatoken")
+			w.Header().Set("grpc-status", "")
+			w.Header().Set("grpc-message", "")
+			if req.Method == http.MethodOptions {
+				return
+			}
+			if wrapServer.IsGrpcWebRequest(req) {
+				log.Println("GRPc call")
+				wrapServer.ServeHTTP(w, req)
+				return
+			}
+		} else {
+			log.Println("HTTP1 request\nSet Header")
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+			w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT, DELETE")
+			w.Header().Set("Access-Control-Allow-Headers", "Accept, Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, X-User-Agent, X-Grpc-Web")
+			w.Header().Set("grpc-status", "")
+			w.Header().Set("grpc-message", "")
+			if req.Method == http.MethodOptions {
+				return
+			}
+			if wrapServer.IsGrpcWebRequest(req) {
+				log.Println("GRPc call")
+				wrapServer.ServeHTTP(w, req)
+				return
+			}
+		}
+		http.DefaultServeMux.ServeHTTP(w, req)
+	})
+	registerServices(grpcServer)
+	l, err := net.Listen("tcp", ":"+grpcPort)
+	if err != nil {
+		log.Fatal(err)
+	}
+	go func() {
+		log.Printf("gRPC Server started on port: %s\n", grpcPort)
+		err := grpcServer.Serve(l)
+		if err != nil {
+			log.Fatal(err)
+		}
+	}()
+	go func() {
+		log.Printf("webServer started on port: %s\n", webPort)
+		err := webServer.ListenAndServeTLS("/etc/ssl/certs/tsl2022.crt", "/etc/ssl/private/tsl_kz.key")
+		if err != nil {
+			log.Fatal(err)
+		}
+	}()
+	waitExitSignal(grpcServer, webServer)
+	log.Println("bye!")
+	fmt.Println("shutting down")
+}
+
+func registerServices(s *grpc.Server) {
+	api.RegisterUserServiceServer(s, service.NewUserService())
+	api.RegisterAuthServiceServer(s, service.NewAuthService())
+	api.RegisterGeoServiceServer(s, service.NewGeoService())
+	api.RegisterCargoServiceServer(s, service.NewCargoService())
+	api.RegisterTruckServiceServer(s, service.NewTruckService())
+	api.RegisterServiceStationServiceServer(s, service.NewServiceStationService())
+	api.RegisterReferenceServiceServer(s, service.NewServiceReferenceService())
+	api.RegisterSparePartServiceServer(s, service.NewSparePartService())
+	api.RegisterTransportServiceServer(s, service.NewTransportService())
+	api.RegisterRoadsideServiceServiceServer(s, service.NewRoadsideServiceService())
+	api.RegisterCompanyServiceServer(s, service.NewCompanyService())
+	api.RegisterProfileServer(s, service.NewProfileService())
+}
+
+func waitExitSignal(s *grpc.Server, w *http.Server) {
+	sigCh := make(chan os.Signal, 1)
+	done := make(chan bool, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		sig := <-sigCh
+		log.Printf("Signal %s\n", sig)
+		s.Stop()
+		err := w.Shutdown(context.Background())
+		if err != nil {
+			log.Fatal(err)
+		}
+		done <- true
+	}()
+	<-done
+}
